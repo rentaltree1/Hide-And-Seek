@@ -31,11 +31,27 @@ function distanceMeters(lat1, lng1, lat2, lng2) {
   return 2 * R * Math.asin(Math.sqrt(a));
 }
 
-function broadcastGameState(gameId) {
-  const game = games[gameId];
-  if (!game) return;
+// Visibility rule:
+// - You always see yourself.
+// - In lobby, locations are not shared.
+// - During play: same role sees same role (teammates), seekers see hiders,
+//   but hiders do NOT see seekers.
+function canSee(viewer, target, status) {
+  if (viewer === target) return true;
+  if (status !== 'playing') return false;
+  if (!viewer.role || !target.role) return false;
+  if (viewer.role === target.role) return true;
+  if (viewer.role === 'seeker' && target.role === 'hider') return true;
+  return false;
+}
 
-  const players = Object.entries(game.players).map(([id, p]) => {
+function buildPlayersFor(game, viewerSocketId) {
+  const viewer = game.players[viewerSocketId];
+  if (!viewer) return null;
+
+  return Object.entries(game.players).map(([id, p]) => {
+    const visible = canSee(viewer, p, game.status);
+
     let inside = true;
     if (game.circle && p.location) {
       const d = distanceMeters(
@@ -46,24 +62,34 @@ function broadcastGameState(gameId) {
       );
       inside = d <= game.circle.radius;
     }
+
     return {
       id,
       name: p.name,
       role: p.role,
       isOwner: id === game.ownerId,
-      // Reveal location ONLY when player is outside the zone.
-      location: !inside && p.location ? p.location : null,
+      location: visible && p.location ? p.location : null,
       inside,
     };
   });
+}
 
-  io.to(gameId).emit('game-state', {
-    name: game.name,
-    status: game.status,
-    circle: game.circle,
-    settings: game.settings,
-    players,
-    ownerId: game.ownerId,
+function broadcastGameState(gameId) {
+  const game = games[gameId];
+  if (!game) return;
+
+  // Send personalized state to each player based on what they're allowed to see.
+  Object.keys(game.players).forEach(socketId => {
+    const players = buildPlayersFor(game, socketId);
+    if (!players) return;
+    io.to(socketId).emit('game-state', {
+      name: game.name,
+      status: game.status,
+      circle: game.circle,
+      settings: game.settings,
+      players,
+      ownerId: game.ownerId,
+    });
   });
 }
 
@@ -78,7 +104,6 @@ function shrinkCircle(gameId) {
   let newLng = old.lng;
 
   if (game.settings.asymmetric && newRadius < old.radius) {
-    // Shift the new center randomly while keeping the new circle inside the old one.
     const maxShift = old.radius - newRadius;
     const angle = Math.random() * 2 * Math.PI;
     const shift = Math.random() * maxShift;
@@ -122,8 +147,8 @@ io.on('connection', (socket) => {
       status: 'lobby',
       circle: null,
       settings: {
-        shrinkIntervalMs: 5 * 60 * 1000, // 5 minutes
-        shrinkAmount: 100, // meters per shrink
+        shrinkIntervalMs: 5 * 60 * 1000,
+        shrinkAmount: 100,
         asymmetric: false,
       },
     };
