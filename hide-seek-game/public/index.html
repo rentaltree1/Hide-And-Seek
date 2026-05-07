@@ -11,10 +11,10 @@
 
   <!-- ===== MENU ===== -->
   <div id="menu" class="screen">
-    <h1>Hide &amp; Seek Zone</h1>
+    <h1>Hide &amp; Seek <span class="accent">Zone</span></h1>
     <div id="menu-buttons" class="menu-buttons">
-      <button id="show-create">Create a Game</button>
-      <button id="show-join">Join a Game</button>
+      <button id="show-create" class="primary">Create a Game</button>
+      <button id="show-join" class="secondary">Join a Game</button>
     </div>
 
     <form id="create-form" class="form hidden">
@@ -22,8 +22,8 @@
       <input id="create-game-name" placeholder="Game name" maxlength="40" required />
       <input id="create-password" type="password" placeholder="Password" maxlength="40" required />
       <input id="create-player-name" placeholder="Your name" maxlength="20" required />
-      <button type="submit">Create</button>
-      <button type="button" class="back secondary">Back</button>
+      <button type="submit" class="primary">Create</button>
+      <button type="button" class="back ghost">Back</button>
     </form>
 
     <form id="join-form" class="form hidden">
@@ -31,8 +31,8 @@
       <input id="join-game-name" placeholder="Game name" maxlength="40" required />
       <input id="join-password" type="password" placeholder="Password" maxlength="40" required />
       <input id="join-player-name" placeholder="Your name" maxlength="20" required />
-      <button type="submit">Join</button>
-      <button type="button" class="back secondary">Back</button>
+      <button type="submit" class="primary">Join</button>
+      <button type="button" class="back ghost">Back</button>
     </form>
 
     <div id="error-msg"></div>
@@ -40,55 +40,110 @@
 
   <!-- ===== LOBBY ===== -->
   <div id="lobby" class="screen hidden">
-    <h2 id="lobby-title">Lobby</h2>
-    <p id="lobby-share" class="muted"></p>
+    <header class="lobby-header">
+      <h2 id="lobby-title">Lobby</h2>
+      <p id="lobby-share" class="muted"></p>
+    </header>
 
-    <h3>Players</h3>
-    <ul id="players-list"></ul>
+    <section class="card">
+      <h3>Players</h3>
+      <ul id="players-list" class="players-list"></ul>
+    </section>
 
+    <!-- ===== Owner setup ===== -->
     <div id="owner-controls" class="hidden">
-      <h3>Play Zone</h3>
-      <p class="muted">Tap the map to place the zone center. Drag the slider to set the radius.</p>
-      <div id="setup-map"></div>
-      <label>
-        Radius:
-        <input type="range" id="radius-slider" min="50" max="5000" value="500" />
-        <span id="radius-value">500</span> m
-      </label>
+      <section class="card">
+        <h3>Play Zone</h3>
+        <p class="muted">Tap the map to place the zone center. Drag the slider to set the radius.</p>
+        <div id="setup-map"></div>
+        <label>
+          Radius
+          <input type="range" id="radius-slider" min="50" max="5000" value="500" />
+          <span id="radius-value">500</span> m
+        </label>
+        <label>
+          Map style
+          <select id="map-type">
+            <option value="street">Street</option>
+            <option value="satellite">Satellite</option>
+          </select>
+        </label>
+      </section>
 
-      <h3>Shrinking</h3>
-      <label>
-        Shrink every
-        <input type="number" id="shrink-interval" min="1" max="60" value="5" />
-        minutes
-      </label>
-      <label>
-        Shrink by
-        <input type="number" id="shrink-amount" min="10" max="2000" value="100" />
-        meters each time
-      </label>
-      <label class="checkbox-label">
-        <input type="checkbox" id="asymmetric" />
-        Asymmetric shrinking (uneven sides)
-      </label>
+      <section class="card">
+        <h3>Shrinking</h3>
+        <label>
+          Shrink every
+          <input type="number" id="shrink-interval" min="1" max="60" value="5" />
+          minutes
+        </label>
+        <label>
+          Shrink by
+          <input type="number" id="shrink-amount" min="10" max="2000" value="100" />
+          meters each time
+        </label>
+        <label class="checkbox-label">
+          <input type="checkbox" id="asymmetric" />
+          Asymmetric shrinking (uneven sides)
+        </label>
+      </section>
 
-      <button id="start-game-btn">Start Game</button>
+      <section class="card">
+        <h3>Pings</h3>
+        <p class="muted">Reveal everyone's position to everyone for 5 seconds, on a timer.</p>
+        <label>
+          Ping every
+          <input type="number" id="ping-interval" min="0" max="60" value="0" />
+          minutes <span class="muted">(0 = off)</span>
+        </label>
+      </section>
+
+      <section class="card">
+        <h3>Power-ups</h3>
+        <p class="muted">A dot spawns inside the zone. First to grab it (within 50ft) sees the other team for 15 seconds. Stacks if you grab another.</p>
+        <label>
+          Spawn every
+          <input type="number" id="powerup-interval" min="0" max="60" value="0" />
+          minutes <span class="muted">(0 = off)</span>
+        </label>
+      </section>
+
+      <button id="start-game-btn" class="primary big">Start Game</button>
       <div id="start-error" class="error"></div>
     </div>
 
-    <div id="non-owner-message" class="hidden muted">
-      <p>Waiting for the game owner to start…</p>
+    <!-- ===== Non-owner preview ===== -->
+    <div id="non-owner-view" class="hidden">
+      <section class="card">
+        <h3>Play Zone</h3>
+        <div id="preview-map" class="preview-map">
+          <div id="preview-empty" class="preview-empty muted">Owner hasn't placed a zone yet…</div>
+        </div>
+        <div id="preview-settings" class="settings-grid"></div>
+      </section>
     </div>
   </div>
 
   <!-- ===== GAME ===== -->
   <div id="game" class="screen hidden">
-    <div id="game-map"></div>
-    <div id="game-info">
-      <div id="role-badge"></div>
-      <div id="status-badge"></div>
-      <button id="end-game-btn" class="hidden secondary">End Game</button>
+    <div id="visibility-banner" class="hidden">
+      <span id="visibility-banner-text"></span>
+      <button id="visibility-banner-close" type="button" aria-label="Close">×</button>
     </div>
+
+    <header id="game-header">
+      <div id="role-badge">YOU ARE</div>
+      <button id="end-game-btn" class="hidden ghost-light">End</button>
+    </header>
+
+    <div id="alerts-strip"></div>
+
+    <div id="game-map"></div>
+
+    <footer id="game-info">
+      <div id="status-badge"></div>
+      <div id="countdown-display">⏱ Circle shrinks in <span id="countdown-time">—:—</span></div>
+    </footer>
   </div>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
