@@ -1,27 +1,54 @@
 // Hide & Seek Zone — client
-// Handles UI, map, geolocation, and Socket.IO communication.
 
 const socket = io();
 
+// ===== Tile providers =====
+const TILE_PROVIDERS = {
+  street: {
+    url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+    attribution: '© OpenStreetMap contributors',
+    maxZoom: 19,
+  },
+  satellite: {
+    url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+    attribution: 'Tiles © Esri',
+    maxZoom: 19,
+  },
+};
+
+// ===== State =====
 let currentGameId = null;
 let isOwner = false;
 let myRole = 'unassigned';
 
 let setupMap = null;
+let setupTileLayer = null;
 let setupCircleLayer = null;
 let setupCenter = null;
 
+let previewMap = null;
+let previewTileLayer = null;
+let previewCircleLayer = null;
+
 let gameMap = null;
+let gameTileLayer = null;
 let gameCircleLayer = null;
-let playerMarkers = {}; // id -> Leaflet marker
+let startZoneLayer = null;
+let powerupMarker = null;
+let playerMarkers = {};
 let myMarker = null;
 
 let watchId = null;
 let lastLocation = null;
 let inGameView = false;
 let bannerTimeout = null;
+let countdownInterval = null;
+let alertsInterval = null;
 
-// ===== Menu navigation =====
+let lastState = null;
+let currentMapType = 'street';
+
+// ===== Menu =====
 const menuButtons = document.getElementById('menu-buttons');
 const createForm = document.getElementById('create-form');
 const joinForm = document.getElementById('join-form');
@@ -76,26 +103,28 @@ joinForm.onsubmit = (e) => {
 function enterLobby(gameName) {
   document.getElementById('menu').classList.add('hidden');
   document.getElementById('lobby').classList.remove('hidden');
-  document.getElementById('lobby-title').textContent = `Lobby: ${gameName}`;
-  document.getElementById('lobby-share').textContent = isOwner
-    ? `Share the game name and password with your friends so they can join.`
-    : `Waiting for players. The owner will start the game.`;
 
   if (isOwner) {
+    document.getElementById('lobby-title').textContent = `Lobby: ${gameName}`;
+    document.getElementById('lobby-share').textContent = `Share the game name and password with your friends so they can join.`;
     document.getElementById('owner-controls').classList.remove('hidden');
     setTimeout(initSetupMap, 50);
   } else {
-    document.getElementById('non-owner-message').classList.remove('hidden');
+    document.getElementById('lobby-title').textContent = `Waiting On Owner`;
+    document.getElementById('lobby-share').textContent = `The owner is setting things up.`;
+    document.getElementById('non-owner-view').classList.remove('hidden');
+    setTimeout(initPreviewMap, 50);
   }
 }
 
+// ===== Setup map (owner) =====
 function initSetupMap() {
   if (setupMap) return;
 
   setupMap = L.map('setup-map').setView([44.2619, -88.4154], 13);
-  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    attribution: '© OpenStreetMap contributors',
-    maxZoom: 19,
+  setupTileLayer = L.tileLayer(TILE_PROVIDERS.street.url, {
+    attribution: TILE_PROVIDERS.street.attribution,
+    maxZoom: TILE_PROVIDERS.street.maxZoom,
   }).addTo(setupMap);
 
   if (navigator.geolocation) {
@@ -112,16 +141,30 @@ function initSetupMap() {
     sendSettings();
   });
 
-  const radiusSlider = document.getElementById('radius-slider');
-  const radiusValue = document.getElementById('radius-value');
-  radiusSlider.oninput = () => {
-    radiusValue.textContent = radiusSlider.value;
+  document.getElementById('radius-slider').oninput = (e) => {
+    document.getElementById('radius-value').textContent = e.target.value;
     if (setupCenter) { drawSetupCircle(); sendSettings(); }
   };
 
-  ['shrink-interval', 'shrink-amount', 'asymmetric'].forEach(id => {
-    document.getElementById(id).onchange = () => { if (setupCenter) sendSettings(); };
+  document.getElementById('map-type').onchange = (e) => {
+    swapTileLayer(setupMap, setupTileLayer, e.target.value);
+    setupTileLayer = currentTileLayer; // updated by swap
+    sendSettings();
+  };
+
+  ['shrink-interval', 'shrink-amount', 'asymmetric', 'ping-interval', 'powerup-interval'].forEach(id => {
+    document.getElementById(id).onchange = () => sendSettings();
   });
+}
+
+let currentTileLayer = null;
+function swapTileLayer(map, oldLayer, mapType) {
+  if (oldLayer) map.removeLayer(oldLayer);
+  const provider = TILE_PROVIDERS[mapType] || TILE_PROVIDERS.street;
+  currentTileLayer = L.tileLayer(provider.url, {
+    attribution: provider.attribution,
+    maxZoom: provider.maxZoom,
+  }).addTo(map);
 }
 
 function drawSetupCircle() {
@@ -137,24 +180,24 @@ function drawSetupCircle() {
 }
 
 function sendSettings() {
-  if (!setupCenter) return;
   socket.emit('update-settings', {
-    circle: {
+    circle: setupCenter ? {
       lat: setupCenter.lat,
       lng: setupCenter.lng,
       radius: parseInt(document.getElementById('radius-slider').value),
-    },
+    } : undefined,
     shrinkIntervalMs: parseInt(document.getElementById('shrink-interval').value) * 60 * 1000,
     shrinkAmount: parseInt(document.getElementById('shrink-amount').value),
     asymmetric: document.getElementById('asymmetric').checked,
+    mapType: document.getElementById('map-type').value,
+    pingIntervalMs: parseInt(document.getElementById('ping-interval').value) * 60 * 1000,
+    powerupIntervalMs: parseInt(document.getElementById('powerup-interval').value) * 60 * 1000,
   });
 }
 
 document.getElementById('start-game-btn').onclick = () => {
   socket.emit('start-game', (res) => {
-    if (res && res.error) {
-      document.getElementById('start-error').textContent = res.error;
-    }
+    if (res && res.error) document.getElementById('start-error').textContent = res.error;
   });
 };
 
@@ -162,29 +205,84 @@ document.getElementById('end-game-btn').onclick = () => {
   if (confirm('End the game for everyone?')) socket.emit('end-game');
 };
 
+// ===== Preview map (non-owner) =====
+function initPreviewMap() {
+  if (previewMap) return;
+  previewMap = L.map('preview-map', { zoomControl: false, dragging: false, scrollWheelZoom: false, doubleClickZoom: false, touchZoom: false })
+    .setView([44.2619, -88.4154], 13);
+  previewTileLayer = L.tileLayer(TILE_PROVIDERS.street.url, {
+    attribution: TILE_PROVIDERS.street.attribution,
+    maxZoom: TILE_PROVIDERS.street.maxZoom,
+  }).addTo(previewMap);
+}
+
+function updatePreview(state) {
+  if (!previewMap) return;
+
+  // Map type
+  const newType = state.settings.mapType || 'street';
+  if (newType !== currentMapType) {
+    currentMapType = newType;
+    if (previewTileLayer) previewMap.removeLayer(previewTileLayer);
+    const provider = TILE_PROVIDERS[newType] || TILE_PROVIDERS.street;
+    previewTileLayer = L.tileLayer(provider.url, {
+      attribution: provider.attribution,
+      maxZoom: provider.maxZoom,
+    }).addTo(previewMap);
+  }
+
+  // Circle
+  const empty = document.getElementById('preview-empty');
+  if (state.circle) {
+    if (empty) empty.style.display = 'none';
+    previewMap.setView([state.circle.lat, state.circle.lng], 15);
+    if (previewCircleLayer) previewMap.removeLayer(previewCircleLayer);
+    previewCircleLayer = L.circle([state.circle.lat, state.circle.lng], {
+      radius: state.circle.radius,
+      color: '#4ecca3',
+      fillColor: '#4ecca3',
+      fillOpacity: 0.2,
+    }).addTo(previewMap);
+  } else {
+    if (empty) empty.style.display = '';
+  }
+
+  // Settings preview
+  const settingsEl = document.getElementById('preview-settings');
+  if (!settingsEl) return;
+  const s = state.settings;
+  const items = [
+    { label: 'Radius', value: state.circle ? `${state.circle.radius} m` : '—' },
+    { label: 'Shrink every', value: `${Math.round(s.shrinkIntervalMs / 60000)} min` },
+    { label: 'Shrink by', value: `${s.shrinkAmount} m` },
+    { label: 'Asymmetric', value: s.asymmetric ? 'On' : 'Off' },
+    { label: 'Ping every', value: s.pingIntervalMs ? `${Math.round(s.pingIntervalMs / 60000)} min` : 'Off' },
+    { label: 'Power-ups', value: s.powerupIntervalMs ? `Every ${Math.round(s.powerupIntervalMs / 60000)} min` : 'Off' },
+  ];
+  settingsEl.innerHTML = items.map(i =>
+    `<div class="setting-item"><div class="setting-label">${i.label}</div><div class="setting-value">${escapeHtml(i.value)}</div></div>`
+  ).join('');
+}
+
 // ===== Visibility banner =====
 function showVisibilityBanner(role) {
   const banner = document.getElementById('visibility-banner');
   const text = document.getElementById('visibility-banner-text');
-
   banner.classList.remove('hider-banner', 'seeker-banner');
 
   if (role === 'hider') {
-    text.textContent = '⚠️ The seeker can see you';
+    text.textContent = '⚠️ Stay inside the circle — leaving makes you visible to seekers';
     banner.classList.add('hider-banner');
   } else if (role === 'seeker') {
-    text.textContent = '👀 You can see the hiders';
+    text.textContent = '👀 Hiders only show on your map when they leave the circle';
     banner.classList.add('seeker-banner');
   } else {
-    return; // unassigned: skip
+    return;
   }
-
   banner.classList.remove('hidden');
 
   if (bannerTimeout) clearTimeout(bannerTimeout);
-  bannerTimeout = setTimeout(() => {
-    banner.classList.add('hidden');
-  }, 5000);
+  bannerTimeout = setTimeout(() => banner.classList.add('hidden'), 5000);
 }
 
 document.getElementById('visibility-banner-close').onclick = () => {
@@ -192,10 +290,13 @@ document.getElementById('visibility-banner-close').onclick = () => {
   if (bannerTimeout) { clearTimeout(bannerTimeout); bannerTimeout = null; }
 };
 
-// ===== Game state handling =====
+// ===== Game state =====
 socket.on('game-state', (state) => {
+  lastState = state;
+
   if (state.status === 'lobby') {
     renderPlayerList(state);
+    if (!isOwner) updatePreview(state);
   } else if (state.status === 'playing') {
     if (!inGameView) enterGame(state);
     else updateGame(state);
@@ -207,10 +308,9 @@ socket.on('game-ended', () => {
   location.reload();
 });
 
-socket.on('disconnect', () => {
-  alert('Lost connection to server. Reload the page.');
-});
+socket.on('disconnect', () => alert('Lost connection to server. Reload the page.'));
 
+// ===== Player list =====
 function renderPlayerList(state) {
   const list = document.getElementById('players-list');
   list.innerHTML = '';
@@ -219,26 +319,42 @@ function renderPlayerList(state) {
     if (p.id === socket.id) myRole = p.role;
 
     const li = document.createElement('li');
-    const left = document.createElement('span');
-    const roleClass = p.role === 'hider' ? 'role-hider'
-                    : p.role === 'seeker' ? 'role-seeker' : 'role-unassigned';
-    left.innerHTML = `<strong>${escapeHtml(p.name)}</strong>` +
-      (p.isOwner ? `<span class="owner-tag">[Owner]</span>` : '') +
-      ` — <span class="${roleClass}">${p.role}</span>`;
-    li.appendChild(left);
+    if (p.role === 'hider') li.classList.add('is-hider');
+    if (p.role === 'seeker') li.classList.add('is-seeker');
+
+    const info = document.createElement('div');
+    info.className = 'player-info';
+    info.innerHTML = `
+      <span class="player-name">${escapeHtml(p.name)}</span>
+      ${p.isOwner ? '<span class="owner-crown" title="Owner">👑</span>' : ''}
+    `;
+
+    const right = document.createElement('div');
+    right.style.display = 'flex';
+    right.style.gap = '8px';
+    right.style.alignItems = 'center';
+
+    const pill = document.createElement('span');
+    const cls = p.role === 'hider' ? 'hider' : p.role === 'seeker' ? 'seeker' : 'unassigned';
+    pill.className = `player-role-pill ${cls}`;
+    pill.textContent = p.role;
+    right.appendChild(pill);
 
     if (isOwner) {
-      const buttons = document.createElement('div');
-      buttons.className = 'role-buttons';
-      buttons.innerHTML = `
-        <button data-role="hider">Hider</button>
-        <button data-role="seeker">Seeker</button>
+      const btns = document.createElement('div');
+      btns.className = 'role-buttons';
+      btns.innerHTML = `
+        <button class="set-hider" data-role="hider">H</button>
+        <button class="set-seeker" data-role="seeker">S</button>
       `;
-      buttons.querySelectorAll('button').forEach(b => {
+      btns.querySelectorAll('button').forEach(b => {
         b.onclick = () => socket.emit('assign-role', { playerId: p.id, role: b.dataset.role });
       });
-      li.appendChild(buttons);
+      right.appendChild(btns);
     }
+
+    li.appendChild(info);
+    li.appendChild(right);
     list.appendChild(li);
   });
 }
@@ -253,9 +369,11 @@ function enterGame(state) {
 
   const me = state.players.find(p => p.id === socket.id);
   myRole = me ? me.role : 'unassigned';
+  const header = document.getElementById('game-header');
   const badge = document.getElementById('role-badge');
-  badge.textContent = `You are ${myRole.toUpperCase()}`;
-  badge.className = myRole;
+  badge.textContent = `YOU ARE ${myRole.toUpperCase()}`;
+  header.className = '';
+  header.classList.add(myRole);
 
   showVisibilityBanner(myRole);
 
@@ -263,21 +381,39 @@ function enterGame(state) {
     initGameMap(state);
     startTracking();
     updateGame(state);
+    if (!countdownInterval) countdownInterval = setInterval(updateCountdown, 1000);
+    if (!alertsInterval) alertsInterval = setInterval(updateAlerts, 500);
   }, 50);
 }
 
 function initGameMap(state) {
   if (gameMap) return;
   gameMap = L.map('game-map').setView([state.circle.lat, state.circle.lng], 16);
-  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    attribution: '© OpenStreetMap contributors',
-    maxZoom: 19,
+  const type = state.settings.mapType || 'street';
+  currentMapType = type;
+  const provider = TILE_PROVIDERS[type];
+  gameTileLayer = L.tileLayer(provider.url, {
+    attribution: provider.attribution,
+    maxZoom: provider.maxZoom,
   }).addTo(gameMap);
 }
 
 function updateGame(state) {
   if (!gameMap || !state.circle) return;
 
+  // Map type changes (in case owner toggled in lobby; rare but possible)
+  const type = state.settings.mapType || 'street';
+  if (type !== currentMapType) {
+    currentMapType = type;
+    if (gameTileLayer) gameMap.removeLayer(gameTileLayer);
+    const provider = TILE_PROVIDERS[type];
+    gameTileLayer = L.tileLayer(provider.url, {
+      attribution: provider.attribution,
+      maxZoom: provider.maxZoom,
+    }).addTo(gameMap);
+  }
+
+  // Play zone circle
   if (gameCircleLayer) gameMap.removeLayer(gameCircleLayer);
   gameCircleLayer = L.circle([state.circle.lat, state.circle.lng], {
     radius: state.circle.radius,
@@ -287,16 +423,43 @@ function updateGame(state) {
     weight: 3,
   }).addTo(gameMap);
 
+  // Seeker start zone (only if you're a seeker and zone is still active)
+  if (startZoneLayer) { gameMap.removeLayer(startZoneLayer); startZoneLayer = null; }
+  if (state.myStartZone && Date.now() < state.myStartZone.expiresAt) {
+    startZoneLayer = L.circle([state.myStartZone.lat, state.myStartZone.lng], {
+      radius: state.myStartZone.radius,
+      color: '#ff4d6d',
+      fillColor: '#ff4d6d',
+      fillOpacity: 0.15,
+      dashArray: '8, 8',
+      weight: 2,
+    }).addTo(gameMap);
+  }
+
+  // Power-up dot
+  if (powerupMarker) { gameMap.removeLayer(powerupMarker); powerupMarker = null; }
+  if (state.currentPowerup) {
+    const icon = L.divIcon({
+      className: 'powerup-marker',
+      html: `<div class="powerup-pulse">⚡</div>`,
+      iconSize: [40, 40],
+      iconAnchor: [20, 20],
+    });
+    powerupMarker = L.marker([state.currentPowerup.lat, state.currentPowerup.lng], { icon }).addTo(gameMap);
+  }
+
+  // Other players' markers
   const seenIds = new Set();
   state.players.forEach(p => {
     if (p.id === socket.id) return;
     seenIds.add(p.id);
 
     if (p.location) {
-      const color = p.role === 'seeker' ? '#ff6b6b' : '#4ecdc4';
+      const color = p.role === 'seeker' ? '#ff5577' : '#4ecdc4';
+      const textColor = p.role === 'seeker' ? '#fff' : '#00263a';
       const icon = L.divIcon({
         className: 'player-marker',
-        html: `<div style="background:${color};color:#1a1a2e;padding:4px 10px;border-radius:6px;font-weight:700;white-space:nowrap;border:2px solid #fff;box-shadow:0 2px 6px rgba(0,0,0,0.4);font-size:12px;">${escapeHtml(p.name)}</div>`,
+        html: `<div style="background:${color};color:${textColor};padding:4px 10px;border-radius:6px;font-weight:700;white-space:nowrap;border:2px solid #fff;box-shadow:0 2px 6px rgba(0,0,0,0.5);font-size:12px;">${escapeHtml(p.name)}</div>`,
         iconSize: [80, 26],
         iconAnchor: [40, 13],
       });
@@ -304,17 +467,13 @@ function updateGame(state) {
         playerMarkers[p.id].setLatLng([p.location.lat, p.location.lng]);
         playerMarkers[p.id].setIcon(icon);
       } else {
-        playerMarkers[p.id] = L.marker(
-          [p.location.lat, p.location.lng],
-          { icon }
-        ).addTo(gameMap);
+        playerMarkers[p.id] = L.marker([p.location.lat, p.location.lng], { icon }).addTo(gameMap);
       }
     } else if (playerMarkers[p.id]) {
       gameMap.removeLayer(playerMarkers[p.id]);
       delete playerMarkers[p.id];
     }
   });
-
   Object.keys(playerMarkers).forEach(id => {
     if (!seenIds.has(id)) {
       gameMap.removeLayer(playerMarkers[id]);
@@ -322,16 +481,83 @@ function updateGame(state) {
     }
   });
 
+  // Status badge
   if (lastLocation) {
-    const d = distanceMeters(
-      lastLocation.lat, lastLocation.lng,
-      state.circle.lat, state.circle.lng
-    );
+    const d = distanceMeters(lastLocation.lat, lastLocation.lng, state.circle.lat, state.circle.lng);
     const inside = d <= state.circle.radius;
     const status = document.getElementById('status-badge');
     status.textContent = inside ? 'Inside Zone' : 'OUTSIDE ZONE';
     status.className = inside ? 'inside-zone' : 'outside-zone';
   }
+
+  // Auto-collect powerup if I'm close enough
+  tryCollectPowerup(state);
+
+  updateAlerts();
+}
+
+function tryCollectPowerup(state) {
+  if (!state || !state.currentPowerup || !lastLocation) return;
+  const pu = state.currentPowerup;
+  const d = distanceMeters(lastLocation.lat, lastLocation.lng, pu.lat, pu.lng);
+  if (d <= 15.24) socket.emit('collect-powerup');
+}
+
+// ===== Alerts strip (ping / reveal / start zone) =====
+function updateAlerts() {
+  const strip = document.getElementById('alerts-strip');
+  if (!strip || !lastState) return;
+  strip.innerHTML = '';
+  const now = Date.now();
+
+  // Ping (everyone visible)
+  if (lastState.pingActiveUntil && now < lastState.pingActiveUntil) {
+    const left = Math.ceil((lastState.pingActiveUntil - now) / 1000);
+    const a = document.createElement('div');
+    a.className = 'alert ping';
+    a.innerHTML = `📡 PING ACTIVE — Everyone is visible (${left}s)`;
+    strip.appendChild(a);
+  }
+
+  // Power-up reveal (other team visible to my team)
+  if (lastState.myTeamRevealMsLeft > 0) {
+    const left = Math.ceil(lastState.myTeamRevealMsLeft / 1000);
+    const otherTeam = myRole === 'hider' ? 'seekers' : 'hiders';
+    const a = document.createElement('div');
+    a.className = 'alert reveal';
+    a.innerHTML = `⚡ POWER-UP — You can see the ${otherTeam} (${left}s)`;
+    strip.appendChild(a);
+    // Decrement locally so the timer feels live between server messages
+    lastState.myTeamRevealMsLeft = Math.max(0, lastState.myTeamRevealMsLeft - 500);
+  }
+
+  // Seeker start zone countdown
+  if (lastState.myStartZone) {
+    const remaining = lastState.myStartZone.expiresAt - now;
+    if (remaining > 0) {
+      const m = Math.floor(remaining / 60000);
+      const s = Math.floor((remaining % 60000) / 1000);
+      const a = document.createElement('div');
+      a.className = 'alert start-zone';
+      a.innerHTML = `🚫 STAY IN START ZONE — ${m}:${String(s).padStart(2, '0')} left`;
+      strip.appendChild(a);
+    }
+  }
+}
+
+// ===== Countdown =====
+function updateCountdown() {
+  const elTime = document.getElementById('countdown-time');
+  if (!elTime || !lastState) return;
+  if (!lastState.nextShrinkAt) {
+    elTime.textContent = '—';
+    return;
+  }
+  const remaining = Math.max(0, lastState.nextShrinkAt - Date.now());
+  const totalSec = Math.floor(remaining / 1000);
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  elTime.textContent = `${m}:${String(s).padStart(2, '0')}`;
 }
 
 // ===== Geolocation =====
@@ -352,16 +578,16 @@ function startTracking() {
         } else {
           const icon = L.divIcon({
             className: 'my-marker',
-            html: `<div style="background:#ffd700;color:#1a1a2e;padding:4px 10px;border-radius:6px;font-weight:700;white-space:nowrap;border:2px solid #fff;box-shadow:0 2px 6px rgba(0,0,0,0.4);font-size:12px;">YOU</div>`,
+            html: `<div style="background:#ffd166;color:#1a1a2e;padding:4px 10px;border-radius:6px;font-weight:700;white-space:nowrap;border:2px solid #fff;box-shadow:0 2px 6px rgba(0,0,0,0.5);font-size:12px;">YOU</div>`,
             iconSize: [50, 26],
             iconAnchor: [25, 13],
           });
-          myMarker = L.marker(
-            [lastLocation.lat, lastLocation.lng],
-            { icon }
-          ).addTo(gameMap);
+          myMarker = L.marker([lastLocation.lat, lastLocation.lng], { icon }).addTo(gameMap);
         }
       }
+
+      // Try collecting after each location update
+      if (lastState) tryCollectPowerup(lastState);
     },
     (err) => console.error('Geolocation error:', err),
     { enableHighAccuracy: true, maximumAge: 3000, timeout: 10000 }
